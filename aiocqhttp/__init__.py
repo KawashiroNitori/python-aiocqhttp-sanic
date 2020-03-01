@@ -11,16 +11,22 @@ import re
 from typing import (Dict, Any, Optional, AnyStr, Callable, Union, List,
                     Awaitable, Coroutine)
 
+from sanic import Sanic, response
+from sanic.exceptions import abort
+from sanic.log import logger
+from sanic.request import Request
+from sanic.response import HTTPResponse
+from sanic.websocket import WebSocketConnection as RawWSConnection
+
 try:
     import ujson as json
 except ImportError:
     import json
 
-from quart import Quart, request, abort, jsonify, websocket, Response
-
 from .api_impl import (AsyncApi, SyncApi, HttpApi, WebSocketReverseApi,
                        UnifiedApi, ResultStore)
 from .bus import EventBus
+from .connection import WebSocketConnection
 from .exceptions import Error, TimingError
 from .event import Event
 from .message import Message, MessageSegment
@@ -113,13 +119,11 @@ class CQHttp(AsyncApi):
         self._bus = EventBus()
         self._loop = None
 
-        self._server_app = Quart(__name__)
-        self._server_app.before_serving(self._before_serving)
-        self._server_app.add_url_rule('/', methods=['POST'],
-                                      view_func=self._handle_http_event)
+        self._server_app = Sanic(__name__)
+        self._server_app.register_listener(self._before_serving, 'before_server_start')
+        self._server_app.add_route(self._handle_http_event, '/', methods=['POST'])
         for p in ('/ws', '/ws/event', '/ws/api'):
-            self._server_app.add_websocket(p, strict_slashes=False,
-                                           view_func=self._handle_wsr)
+            self._server_app.add_websocket_route(self._handle_wsr, p)
 
         self._configure(
             api_root,
@@ -144,7 +148,7 @@ class CQHttp(AsyncApi):
         self._api._wsr_api = WebSocketReverseApi(
             self._wsr_api_clients, api_timeout_sec)
 
-    async def _before_serving(self):
+    async def _before_serving(self, app, loop):
         self._loop = asyncio.get_running_loop()
 
     @property
@@ -153,14 +157,14 @@ class CQHttp(AsyncApi):
         return self._server_app
 
     @property
-    def server_app(self) -> Quart:
+    def server_app(self) -> Sanic:
         """Quart app 对象，可用来对 Quart 的运行做精细控制，或添加新的路由等。"""
         return self._server_app
 
     @property
     def logger(self) -> logging.Logger:
         """Quart app 的 logger，等价于 ``bot.server_app.logger``。"""
-        return self._server_app.logger
+        return logger
 
     @property
     def loop(self) -> Optional[asyncio.AbstractEventLoop]:
@@ -203,7 +207,7 @@ class CQHttp(AsyncApi):
                  *args, **kwargs) -> Coroutine[None, None, None]:
         if 'use_reloader' not in kwargs:
             kwargs['use_reloader'] = False
-        return self._server_app.run_task(host=host, port=port, *args, **kwargs)
+        return self._server_app.create_server(host=host, port=port, *args, **kwargs)
 
     async def call_action(self, action: str, **params) -> Any:
         """
@@ -329,7 +333,7 @@ class CQHttp(AsyncApi):
     on_meta_event = _deco_maker('meta_event')
     __pdoc__['CQHttp.on_meta_event'] = "注册元事件处理函数，用作装饰器，用法同上。"
 
-    async def _handle_http_event(self) -> Response:
+    async def _handle_http_event(self, request: Request) -> HTTPResponse:
         if self._secret:
             if 'X-Signature' not in request.headers:
                 self.logger.warning('signature header is missed')
@@ -337,12 +341,12 @@ class CQHttp(AsyncApi):
 
             sec = self._secret
             sec = sec.encode('utf-8') if isinstance(sec, str) else sec
-            sig = hmac.new(sec, await request.get_data(), 'sha1').hexdigest()
+            sig = hmac.new(sec, request.body, 'sha1').hexdigest()
             if request.headers['X-Signature'] != 'sha1=' + sig:
                 self.logger.warning('signature header is invalid')
                 abort(403)
 
-        payload = await request.json
+        payload = request.json
         if not isinstance(payload, dict):
             abort(400)
 
@@ -351,14 +355,14 @@ class CQHttp(AsyncApi):
                 'there is already a reverse websocket api connection, '
                 'so the event may be handled twice.')
 
-        response = await self._handle_event(payload)
-        if isinstance(response, dict):
-            return jsonify(response)
-        return Response('', 204)
+        resp = await self._handle_event(payload)
+        if isinstance(resp, dict):
+            return response.json(resp)
+        return response.empty()
 
-    async def _handle_wsr(self) -> None:
+    async def _handle_wsr(self, request: Request, websocket: RawWSConnection) -> None:
         if self._access_token:
-            auth = websocket.headers.get('Authorization', '')
+            auth = request.headers.get('Authorization', '')
             m = re.fullmatch(r'(?:[Tt]oken|[Bb]earer) (?P<token>\S+)', auth)
             if not m:
                 self.logger.warning('authorization header is missed')
@@ -369,19 +373,20 @@ class CQHttp(AsyncApi):
                 self.logger.warning('authorization header is invalid')
                 abort(403)
 
-        role = websocket.headers['X-Client-Role'].lower()
+        role = request.headers['X-Client-Role'].lower()
+        conn = WebSocketConnection(request, websocket)
         if role == 'event':
-            await self._handle_wsr_event()
+            await self._handle_wsr_event(conn)
         elif role == 'api':
-            await self._handle_wsr_api()
+            await self._handle_wsr_api(conn)
         elif role == 'universal':
-            await self._handle_wsr_universal()
+            await self._handle_wsr_universal(conn)
 
-    async def _handle_wsr_event(self) -> None:
+    async def _handle_wsr_event(self, websocket: WebSocketConnection) -> None:
         try:
             while True:
                 try:
-                    payload = json.loads(await websocket.receive())
+                    payload = json.loads(await websocket.recv())
                 except ValueError:
                     payload = None
 
@@ -393,23 +398,23 @@ class CQHttp(AsyncApi):
         finally:
             pass
 
-    async def _handle_wsr_api(self) -> None:
-        self._add_wsr_api_client()
+    async def _handle_wsr_api(self, websocket: WebSocketConnection) -> None:
+        self._add_wsr_api_client(websocket)
         try:
             while True:
                 try:
-                    ResultStore.add(json.loads(await websocket.receive()))
+                    ResultStore.add(json.loads(await websocket.recv()))
                 except ValueError:
                     pass
         finally:
-            self._remove_wsr_api_client()
+            self._remove_wsr_api_client(websocket)
 
-    async def _handle_wsr_universal(self) -> None:
-        self._add_wsr_api_client()
+    async def _handle_wsr_universal(self, websocket: WebSocketConnection) -> None:
+        self._add_wsr_api_client(websocket)
         try:
             while True:
                 try:
-                    payload = json.loads(await websocket.receive())
+                    payload = json.loads(await websocket.recv())
                 except ValueError:
                     payload = None
 
@@ -425,14 +430,13 @@ class CQHttp(AsyncApi):
                     # is a api result
                     ResultStore.add(payload)
         finally:
-            self._remove_wsr_api_client()
+            self._remove_wsr_api_client(websocket)
 
-    def _add_wsr_api_client(self) -> None:
-        ws = websocket._get_current_object()
+    def _add_wsr_api_client(self, websocket: WebSocketConnection) -> None:
         self_id = websocket.headers['X-Self-ID']
-        self._wsr_api_clients[self_id] = ws
+        self._wsr_api_clients[self_id] = websocket
 
-    def _remove_wsr_api_client(self) -> None:
+    def _remove_wsr_api_client(self, websocket: WebSocketConnection) -> None:
         self_id = websocket.headers['X-Self-ID']
         if self_id in self._wsr_api_clients:
             # we must check the existence here,
@@ -457,8 +461,8 @@ class CQHttp(AsyncApi):
 
     async def _handle_event_with_response(
             self, payload: Dict[str, Any]) -> None:
-        response = await self._handle_event(payload)
-        if isinstance(response, dict):
+        resp = await self._handle_event(payload)
+        if isinstance(resp, dict):
             payload.pop('message', None)  # avoid wasting bandwidth
             payload.pop('raw_message', None)
             payload.pop('comment', None)
@@ -467,7 +471,7 @@ class CQHttp(AsyncApi):
                 await self._api.call_action(
                     self_id=payload['self_id'],
                     action='.handle_quick_operation_async',
-                    context=payload, operation=response
+                    context=payload, operation=resp
                 )
             except Error:
                 pass

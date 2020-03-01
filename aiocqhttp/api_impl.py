@@ -7,6 +7,7 @@ import asyncio
 import sys
 from typing import Callable, Dict, Any, Optional, Union, Awaitable
 
+from aiocqhttp.connection import WebSocketConnection
 from .api import Api
 
 try:
@@ -15,8 +16,6 @@ except ImportError:
     import json
 
 import httpx
-from quart import websocket as event_ws
-from quart.wrappers.request import Websocket
 
 from .exceptions import ActionFailed, ApiNotAvailable, HttpFailed, NetworkError
 from .utils import sync_wait
@@ -133,7 +132,7 @@ class WebSocketReverseApi(AsyncApi):
     """
 
     def __init__(self,
-                 connected_clients: Dict[str, Websocket],
+                 connected_clients: Dict[str, WebSocketConnection],
                  timeout_sec: float):
         super().__init__()
         self._clients = connected_clients
@@ -144,9 +143,6 @@ class WebSocketReverseApi(AsyncApi):
         if params.get('self_id'):
             # 明确指定
             api_ws = self._clients.get(str(params['self_id']))
-        elif event_ws and event_ws.headers['X-Self-ID'] in self._clients:
-            # 没有指定，但在事件处理函数中
-            api_ws = self._clients.get(event_ws.headers['X-Self-ID'])
         elif len(self._clients) == 1:
             # 没有指定，不在事件处理函数中，但只有一个连接
             api_ws = tuple(self._clients.values())[0]

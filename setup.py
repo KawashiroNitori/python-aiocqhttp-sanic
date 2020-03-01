@@ -4,20 +4,20 @@ with open('README.md', 'r', encoding='utf-8') as f:
     long_description = f.read()
 
 setup(
-    name='aiocqhttp',
+    name='aiocqhttp-sanic',
     version='1.2.3',
-    url='https://github.com/cqmoe/python-aiocqhttp',
+    url='https://github.com/KawashiroNitori/python-aiocqhttp-sanic',
     license='MIT License',
-    author='Richard Chien',
+    author='Richard Chien, KawashiroNitori',
     author_email='richardchienthebest@gmail.com',
-    description='A Python SDK with async I/O for CQHTTP.',
+    description='A Python SDK with async I/O for CQHTTP (Based on Sanic).',
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(include=('aiocqhttp', 'aiocqhttp.*')),
     package_data={
         '': ['*.pyi'],
     },
-    install_requires=['Quart>=0.11,<0.12', 'httpx>=0.11,<1.0'],
+    install_requires=['sanic<=19.9.0', 'httpx>=0.11,<1.0'],
     extras_require={
         'all': ['ujson'],
     },
