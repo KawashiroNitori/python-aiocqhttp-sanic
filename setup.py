@@ -5,7 +5,7 @@ with open('README.md', 'r', encoding='utf-8') as f:
 
 setup(
     name='aiocqhttp-sanic',
-    version='1.2.3a1',
+    version='1.2.3-pre.1',
     url='https://github.com/KawashiroNitori/python-aiocqhttp-sanic',
     license='MIT License',
     author='Richard Chien, KawashiroNitori',
