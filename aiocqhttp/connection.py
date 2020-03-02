@@ -1,13 +1,12 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-from typing import Union
-
 from sanic.request import Request
-from sanic.websocket import WebSocketCommonProtocol as conn
+from sanic.websocket import WebSocketCommonProtocol
 
 
-class WebSocketConnection(conn):
-    def __init__(self, request: Request, connection: conn):
+class WebSocketConnection:
+    def __init__(self, request: Request, connection: WebSocketCommonProtocol):
+        connection.keepalive_ping_task.cancel()
         self.conn = connection
         self.request = request
         self.headers = request.headers

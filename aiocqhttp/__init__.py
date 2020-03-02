@@ -16,7 +16,7 @@ from sanic.exceptions import abort
 from sanic.log import logger
 from sanic.request import Request
 from sanic.response import HTTPResponse
-from sanic.websocket import WebSocketConnection as RawWSConnection
+from websockets import WebSocketCommonProtocol
 
 try:
     import ujson as json
@@ -360,7 +360,7 @@ class CQHttp(AsyncApi):
             return response.json(resp)
         return response.empty()
 
-    async def _handle_wsr(self, request: Request, websocket: RawWSConnection) -> None:
+    async def _handle_wsr(self, request: Request, websocket: WebSocketCommonProtocol) -> None:
         if self._access_token:
             auth = request.headers.get('Authorization', '')
             m = re.fullmatch(r'(?:[Tt]oken|[Bb]earer) (?P<token>\S+)', auth)
